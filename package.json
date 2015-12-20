@@ -45,6 +45,7 @@
     "rimraf": "^2.4.3"
   },
   "dependencies": {
+    "immutable": "^3.7.6",
     "redux": "^3.0.2"
   }
 }

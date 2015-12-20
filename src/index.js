@@ -1,3 +1,5 @@
+import Immutable from 'immutable'
+
 // debug output
 let __DEBUG__
 function debug (...args) {
@@ -55,8 +57,7 @@ export const ActionCreators = {
 
 // length: get length of history
 function length (history) {
-  const { past, future } = history
-  return past.length + 1 + future.length
+  return history.get('past').size + 1 + history.get('future').size
 }
 // /length
 
@@ -66,26 +67,19 @@ function length (history) {
 function insert (history, state, limit) {
   debug('insert', {state, history, free: limit - length(history)})
 
-  const { past, present } = history
   const historyOverflow = limit && length(history) >= limit
 
-  if (present === undefined) {
+  if (history.get('present') === undefined || history.get('present').size === 0) {
     // init history
-    return {
-      past: [],
-      present: state,
-      future: []
-    }
+    return history.set('past', Immutable.List())
+                  .set('present', state)
+                  .set('future', Immutable.List())
   }
 
-  return {
-    past: [
-      ...past.slice(historyOverflow ? 1 : 0),
-      present
-    ],
-    present: state,
-    future: []
-  }
+  return history.updateIn(['past'], past => past.slice(historyOverflow ? 1 : 0)
+                                                .push(history.get('present')))
+                .set('present', state)
+                .set('future', Immutable.List())
 }
 // /insert
 
@@ -93,18 +87,11 @@ function insert (history, state, limit) {
 function undo (history) {
   debug('undo', {history})
 
-  const { past, present, future } = history
+  if (history.get('past').size <= 0) return history
 
-  if (past.length <= 0) return history
-
-  return {
-    past: past.slice(0, past.length - 1), // remove last element from past
-    present: past[past.length - 1], // set element as new present
-    future: [
-      present, // old present state is in the future now
-      ...future
-    ]
-  }
+  return history.updateIn(['past'], past => past.slice(0, history.get('past').size - 1))
+                .set('present', history.getIn(['past', history.get('past').size - 1]))
+                .updateIn(['future'], future => future.unshift(history.get('present')))
 }
 // /undo
 
@@ -112,18 +99,11 @@ function undo (history) {
 function redo (history) {
   debug('redo', {history})
 
-  const { past, present, future } = history
+  if (history.get('future').size <= 0) return history
 
-  if (future.length <= 0) return history
-
-  return {
-    future: future.slice(1, future.length), // remove element from future
-    present: future[0], // set element as new present
-    past: [
-      ...past,
-      present // old present state is in the past now
-    ]
-  }
+  return history.updateIn(['future'], future => future.slice(1, history.get('future').size))
+                .set('present', history.getIn(['future', 0]))
+                .updateIn(['past'], past => past.push(history.get('present')))
 }
 // /redo
 
@@ -131,58 +111,44 @@ function redo (history) {
 function jumpToFuture (history, index) {
   if (index === 0) return redo(history)
 
-  const { past, present, future } = history
-
-  return {
-    future: future.slice(index + 1),
-    present: future[index],
-    past: past.concat([present])
-              .concat(future.slice(0, index))
-  }
+  return history.updateIn(['future'], future => future.slice(index + 1))
+                .set('present', history.getIn(['future', index]))
+                .updateIn(['past'], past => past.push(history.get('present'))
+                                                .concat(history.get('future').slice(0, index)))
 }
 // /jumpToFuture
 
 // jumpToPast: jump to requested index in past history
 function jumpToPast (history, index) {
-  if (index === history.past.length - 1) return undo(history)
+  if (index === history.get('past').size - 1) return undo(history)
 
-  const { past, present, future } = history
-
-  return {
-    future: past.slice(index + 1)
-                .concat([present])
-                .concat(future),
-    present: past[index],
-    past: past.slice(0, index)
-  }
+  return history.set('future', history.get('past').slice(index + 1)
+                                                    .push(history.get('present'))
+                                                    .concat(history.get('future')))
+                .set('present', history.getIn(['past', index]))
+                .updateIn(['past'], past => past.slice(0, index))
 }
 // /jumpToPast
 
 // wrapState: for backwards compatibility to 0.4
 function wrapState (state) {
-  return {
-    ...state,
-    history: state
-  }
+  return state.set('history', state)
 }
 // /wrapState
 
 // updateState
 function updateState (state, history) {
-  return wrapState({
-    ...state,
-    ...history
-  })
+  return wrapState(state.merge(history))
 }
 // /updateState
 
 // createHistory
 function createHistory (state) {
-  return {
+  return Immutable.fromJS({
     past: [],
-    present: state,
+    present: undefined,
     future: []
-  }
+  }).set('present', state)
 }
 // /createHistory
 
@@ -246,37 +212,28 @@ export default function undoable (reducer, rawConfig = {}) {
         return res ? updateState(state, res) : state
 
       default:
-        res = reducer(state && state.present, action)
+        res = reducer(state && state.get('present'), action)
 
         if (config.initTypes.some((actionType) => actionType === action.type)) {
           debug('reset history due to init action')
           debugEnd()
-          return wrapState({
-            ...state,
-            ...createHistory(res)
-          })
+          return wrapState((state || Immutable.Map()).merge(createHistory(res)))
         }
 
         if (config.filter && typeof config.filter === 'function') {
-          if (!config.filter(action, res, state && state.present)) {
+          if (!config.filter(action, res, state && state.get('present'))) {
             debug('filter prevented action, not storing it')
             debugEnd()
-            return wrapState({
-              ...state,
-              present: res
-            })
+            return wrapState((state || Immutable.Map()).merge(Immutable.fromJS({ present: undefined }).set('present', res)))
           }
         }
 
-        const history = (state && state.present !== undefined) ? state : config.history
+        const history = (state && state.get('present') !== undefined) ? state : config.history
         const updatedHistory = insert(history, res, config.limit)
         debug('after insert', {history: updatedHistory, free: config.limit - length(updatedHistory)})
         debugEnd()
 
-        return wrapState({
-          ...state,
-          ...updatedHistory
-        })
+        return wrapState((state || Immutable.Map()).merge(updatedHistory))
     }
   }
 }
